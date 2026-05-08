@@ -53,50 +53,59 @@ class TorchDDP:
         us,
         reg
     ):
-        T, nu = us.shape
+        B, T, nu = us.shape
         nx = self.nx
         device = xs.device
         dtype = xs.dtype
  
         I_nu = torch.eye(nu, device=device, dtype=dtype)
 
-        Ks = torch.zeros(T, nu, nx, device=device, dtype=dtype)
-        ks = torch.zeros(T, nu, device=device, dtype=dtype)
+        Ks = torch.zeros(B, T, nu, nx, device=device, dtype=dtype)
+        ks = torch.zeros(B, T, nu, device=device, dtype=dtype)
 
-        Vx = self.lf_x(xs[-1])
-        Vxx = self.lf_xx(xs[-1])
+        Vx  = torch.vmap(self.lf_x)(xs[:, -1])
+        Vxx = torch.vmap(self.lf_xx)(xs[:, -1])
 
-        lx_all, lu_all, lxx_all, luu_all, lux_all = torch.vmap(self.run_derivs)(xs[:-1], us)
-        fx_all, fu_all = torch.vmap(self.dyn_derivs)(xs[:-1], us)
+        # vmap both over B and over T. Flatten it only for vmapping and then reshape it back
+        xs_flat = xs[:, :-1].reshape(B*T, nx)   
+        us_flat = us.reshape(B*T, nu)        
+
+        lx_all, lu_all, lxx_all, luu_all, lux_all = torch.vmap(self.run_derivs)(xs_flat, us_flat)
+        fx_all, fu_all = torch.vmap(self.dyn_derivs)(xs_flat, us_flat)
+
+        lx_all  = lx_all.reshape(B, T, nx)
+        lu_all  = lu_all.reshape(B, T, nu)
+        lxx_all = lxx_all.reshape(B, T, nx, nx)
+        luu_all = luu_all.reshape(B, T, nu, nu)
+        lux_all = lux_all.reshape(B, T, nu, nx)
+        fx_all  = fx_all.reshape(B, T, nx, nx)
+        fu_all  = fu_all.reshape(B, T, nx, nu)
 
         # Armijo expected dV components
-        dV1 = torch.tensor(0.0, device=device, dtype=dtype)
-        dV2 = torch.tensor(0.0, device=device, dtype=dtype)
+        dV1 = torch.zeros(B, device=device, dtype=dtype)
+        dV2 = torch.zeros(B, device=device, dtype=dtype)
 
-        for i in reversed(range(T)):
-            x = xs[i]
-            u = us[i]
-            
-            lx, lu, lxx, luu, lux = lx_all[i], lu_all[i], lxx_all[i], luu_all[i], lux_all[i]
-            fx, fu = fx_all[i], fu_all[i]
+        for i in reversed(range(T)):           
+            lx, lu, lxx, luu, lux = lx_all[:,i], lu_all[:,i], lxx_all[:,i], luu_all[:,i], lux_all[:,i]
+            fx, fu = fx_all[:,i], fu_all[:,i]
 
-            Qx = lx + fx.T @ Vx
-            Qu = lu + fu.T @ Vx
-            Qxx = lxx + fx.T @ Vxx @ fx
-            Quu = luu + fu.T @ Vxx @ fu + I_nu * reg
-            Qux = lux + fu.T @ Vxx @ fx 
+            Qx = lx + torch.einsum('bki,bk->bi', fx, Vx) 
+            Qu = lu + torch.einsum('bki,bk->bi', fu, Vx) 
+            Qxx = lxx + torch.einsum('bji,bjk,bkl->bil', fx, Vxx, fx)
+            Quu = luu + torch.einsum('bji,bjk,bkl->bil', fu, Vxx, fu) + I_nu * reg
+            Qux = lux + torch.einsum('bji,bjk,bkl->bil', fu, Vxx, fx)
 
             k = -torch.linalg.solve(Quu, Qu)
             K = -torch.linalg.solve(Quu, Qux)
 
-            Vx = Qx + Qux.T @ k
-            Vxx = Qxx + Qux.T @ K 
+            Vx  = Qx  + torch.einsum('bji,bj->bi', Qux, k)
+            Vxx = Qxx + torch.einsum('bji,bjk->bik', Qux, K)
 
-            ks[i] = k
-            Ks[i] = K
+            ks[:, i] = k
+            Ks[:, i] = K
 
-            dV1 += k @ Qu
-            dV2 += k @ Quu @ k
+            dV1 += torch.einsum('bi,bi->b', k, Qu)
+            dV2 += torch.einsum('bi,bij,bj->b', k, Quu, k)
 
         return ks, Ks, dV1, dV2
 
@@ -108,23 +117,23 @@ class TorchDDP:
         Ks,
         alpha
     ):
-        T, nu = us.shape
+        B, T, nu = us.shape
         nx = self.nx
         device = xs.device
         dtype = xs.dtype
 
-        x = xs[0].clone()
+        x = xs[:, 0].clone()
         
-        new_xs = torch.zeros(T+1, nx, device=device, dtype=dtype)
-        new_us = torch.zeros(T, nu, device=device, dtype=dtype)
-        new_xs[0] = x
+        new_xs = torch.zeros(B, T+1, nx, device=device, dtype=dtype)
+        new_us = torch.zeros(B, T, nu, device=device, dtype=dtype)
+        new_xs[:, 0] = x
 
         for i in range(T):
-            delta_x = x - xs[i]
-            u = us[i] + alpha * ks[i] + Ks[i] @ delta_x
-            x = self.f(x,u)
-            new_xs[i+1] = x
-            new_us[i] = u
+            delta_x = x - xs[:, i]
+            u = us[:,i] + alpha.unsqueeze(-1) * ks[:,i] + torch.einsum('bij,bj->bi', Ks[:, i], delta_x)
+            x = torch.vmap(self.f)(x, u)
+            new_xs[:, i+1] = x
+            new_us[:, i] = u
 
         return new_xs, new_us
     
@@ -142,17 +151,31 @@ class TorchDDP:
         max_iter
     ):
         assert rho < 1 and rho > 0
-        alpha = 1.
+        B, _, _ = xs.shape
+        device = xs.device
+        dtype = xs.dtype
+
+        alpha = torch.ones(B, device=device, dtype=dtype)
         J_nom = self.total_cost(xs, us)
 
         new_xs, new_us = xs, us
+        accepted = torch.zeros(B, device=device, dtype=torch.bool)
+
         for _ in range(max_iter):
             try_xs, try_us = self.forward(xs, us, ks, Ks, alpha)
-            if self.armijo_condition(try_xs, try_us, J_nom, alpha, dV1, dV2, beta):
-                new_xs = try_xs
-                new_us = try_us
+
+            all_accepted = self.armijo_condition(try_xs, try_us, J_nom, alpha, dV1, dV2, beta)
+            newly_accepted = all_accepted & ~accepted
+
+            new_xs = torch.where(newly_accepted.view(B,1,1), try_xs, new_xs)
+            new_us = torch.where(newly_accepted.view(B,1,1), try_us, new_us)
+
+            accepted = accepted | newly_accepted
+
+            if accepted.all():
                 break
-            alpha *= rho
+
+            alpha = torch.where(accepted, alpha, alpha * rho)
 
         return new_xs, new_us
 
@@ -168,26 +191,26 @@ class TorchDDP:
     ):
         J_try = self.total_cost(xs,us)
 
-        return J_try < J_nom + beta * (alpha * dV1 + 0.5 * alpha**2 *dV2)
+        return J_try < J_nom + beta * (alpha * dV1 + 0.5 * alpha**2 * dV2)
 
     def rollout(
             self,
             x0, 
             us
     ):
-        T, _ = us.shape
+        B, T, _ = us.shape
         nx = self.nx
         device = us.device
         dtype = us.dtype
 
-        xs = torch.zeros(T+1, nx, device=device, dtype=dtype)
+        xs = torch.zeros(B, T+1, nx, device=device, dtype=dtype)
         x = x0.clone()
-        xs[0] = x
+        xs[:, 0] = x
 
         for i in range(T):
-            u = us[i]
-            x = self.f(x,u)
-            xs[i+1] = x
+            u = us[:, i]
+            x = torch.vmap(self.f)(x, u)
+            xs[:, i+1] = x
 
         return xs
     
@@ -196,16 +219,18 @@ class TorchDDP:
         xs,
         us
     ):
-        T, _ = us.shape
-        cost = 0.
+        B, T, _ = us.shape
+        device = us.device
+        dtype = us.dtype
+        cost = torch.zeros(B, device=device, dtype=dtype)
         
         for i in range(T):
-            x = xs[i]
-            u = us[i]
+            x = xs[:,i]
+            u = us[:,i]
 
-            cost += self.l(x,u)
+            cost += torch.vmap(self.l)(x,u)
 
-        x = xs[-1]
-        cost += self.lf(x)
+        x = xs[:,-1]
+        cost += torch.vmap(self.lf)(x)
 
         return cost

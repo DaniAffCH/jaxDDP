@@ -26,14 +26,19 @@ class TorchDDP:
         self,
         x0: torch.Tensor,  
         us_guess: torch.Tensor,
-        n_iter: int
+        n_iter: int,
+        # Line search parameters:
+        ls_rho: float = 0.5,
+        ls_beta: float = 1e-4,
+        ls_max_iter: int = 10,
     ):
         us = us_guess.clone()
         xs = self.rollout(x0, us)
 
         for _ in range(n_iter):
-            ks, Ks = self.backward(xs, us)
-            xs, us = self.forward(xs, us, ks, Ks, alpha=0.1)
+            ks, Ks, dV1, dV2 = self.backward(xs, us)
+            xs, us = self.forward_ls(xs, us, ks, Ks, dV1, dV2, ls_rho, ls_beta, ls_max_iter)
+
 
         return xs, us
 
@@ -55,6 +60,10 @@ class TorchDDP:
 
         Vx = self.lf_x(xs[-1])
         Vxx = self.lf_xx(xs[-1])
+
+        # Armijo expected dV components
+        dV1 = torch.tensor(0.0, device=device, dtype=dtype)
+        dV2 = torch.tensor(0.0, device=device, dtype=dtype)
 
         for i in reversed(range(T)):
             x = xs[i]
@@ -84,7 +93,10 @@ class TorchDDP:
             ks[i] = k
             Ks[i] = K
 
-        return ks, Ks
+            dV1 += k @ Qu
+            dV2 += k @ Quu @ k
+
+        return ks, Ks, dV1, dV2
 
     def forward(
         self,
@@ -113,6 +125,48 @@ class TorchDDP:
             new_us[i] = u
 
         return new_xs, new_us
+    
+    # Forward with Armijo line search
+    def forward_ls(
+        self,
+        xs,
+        us,
+        ks,
+        Ks,
+        dV1,
+        dV2,
+        rho,
+        beta,
+        max_iter
+    ):
+        assert rho < 1 and rho > 0
+        alpha = 1.
+        J_nom = self.total_cost(xs, us)
+
+        new_xs, new_us = xs, us
+        for _ in range(max_iter):
+            try_xs, try_us = self.forward(xs, us, ks, Ks, alpha)
+            if self.armijo_condition(try_xs, try_us, J_nom, alpha, dV1, dV2, beta):
+                new_xs = try_xs
+                new_us = try_us
+                break
+            alpha *= rho
+
+        return new_xs, new_us
+
+    def armijo_condition(
+        self,
+        xs,
+        us,
+        J_nom,
+        alpha,
+        dV1,
+        dV2,
+        beta
+    ):
+        J_try = self.total_cost(xs,us)
+
+        return J_try < J_nom + beta * (alpha * dV1 + 0.5 * alpha**2 *dV2)
 
     def rollout(
             self,

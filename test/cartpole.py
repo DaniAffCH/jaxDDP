@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from ..src import TorchDDP
 from .utils import gif_cartpole
+import time
 
 dtype  = torch.float64
 device = "cpu"
@@ -40,8 +41,12 @@ def terminal_cost(x):
 x0      = torch.tensor([0.0, -1.5, 0.0, 0.0], dtype=dtype)
 us_init = torch.zeros(T, nu, dtype=dtype)
 
+t0 = time.time()
 solver = TorchDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu)
+print(f"Solver setup time: {time.time() - t0}")
+t0 = time.time()
 xs, us = solver.solve(x0, us_init, n_iter=200, reg=0.01)
+print(f"Solver solve time: {time.time() - t0}")
 
 print("Final state:", xs[-1])
 print("Final cost: ", solver.total_cost(xs, us).item())

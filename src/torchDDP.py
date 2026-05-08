@@ -22,6 +22,9 @@ class TorchDDP:
         self.lf_x  = grad(terminal_cost)
         self.lf_xx = jacrev(grad(terminal_cost))
 
+        self.run_derivs = lambda x, u: (self.l_x(x,u), self.l_u(x,u), self.l_xx(x,u), self.l_uu(x,u), self.l_ux(x,u))
+        self.dyn_derivs = lambda x, u: (self.f_x(x,u), self.f_u(x,u))
+
     def solve(
         self,
         x0: torch.Tensor,  
@@ -63,6 +66,9 @@ class TorchDDP:
         Vx = self.lf_x(xs[-1])
         Vxx = self.lf_xx(xs[-1])
 
+        lx_all, lu_all, lxx_all, luu_all, lux_all = torch.vmap(self.run_derivs)(xs[:-1], us)
+        fx_all, fu_all = torch.vmap(self.dyn_derivs)(xs[:-1], us)
+
         # Armijo expected dV components
         dV1 = torch.tensor(0.0, device=device, dtype=dtype)
         dV2 = torch.tensor(0.0, device=device, dtype=dtype)
@@ -71,14 +77,8 @@ class TorchDDP:
             x = xs[i]
             u = us[i]
             
-            lx = self.l_x(x, u)
-            lu = self.l_u(x, u)
-            lxx = self.l_xx(x, u) 
-            luu = self.l_uu(x, u)
-            lux = self.l_ux(x, u)
-
-            fx = self.f_x(x, u)
-            fu = self.f_u(x, u)
+            lx, lu, lxx, luu, lux = lx_all[i], lu_all[i], lxx_all[i], luu_all[i], lux_all[i]
+            fx, fu = fx_all[i], fu_all[i]
 
             Qx = lx + fx.T @ Vx
             Qu = lu + fu.T @ Vx

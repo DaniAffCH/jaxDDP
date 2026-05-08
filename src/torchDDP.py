@@ -1,0 +1,155 @@
+import torch
+from torch.func import grad, jacrev
+
+class TorchDDP:
+    def __init__(self, dynamics, running_cost, terminal_cost, nx: int, nu: int):
+        self.f  = dynamics
+        self.l  = running_cost
+        self.lf = terminal_cost
+        self.nx = nx
+        self.nu = nu
+
+        self.f_x = jacrev(self.f, argnums=0)
+        self.f_u = jacrev(self.f, argnums=1)
+
+        self.l_x  = grad(running_cost, argnums=0)
+        self.l_u  = grad(running_cost, argnums=1)
+
+        self.l_xx = jacrev(self.l_x, argnums=0)
+        self.l_uu = jacrev(self.l_u, argnums=1)
+        self.l_ux = jacrev(self.l_u, argnums=0)
+
+        self.lf_x  = grad(terminal_cost)
+        self.lf_xx = jacrev(grad(terminal_cost))
+
+    def solve(
+        self,
+        x0: torch.Tensor,  
+        us_guess: torch.Tensor,
+        n_iter: int
+    ):
+        us = us_guess.clone()
+        xs = self.rollout(x0, us)
+
+        for _ in range(n_iter):
+            ks, Ks = self.backward(xs, us)
+            xs, us = self.forward(xs, us, ks, Ks, alpha=0.1)
+
+        return xs, us
+
+    def backward(
+        self,
+        xs,
+        us,
+        reg = 1e-6
+    ):
+        T, nu = us.shape
+        nx = self.nx
+        device = xs.device
+        dtype = xs.dtype
+ 
+        I_nu = torch.eye(nu, device=device, dtype=dtype)
+
+        Ks = torch.zeros(T, nu, nx, device=device, dtype=dtype)
+        ks = torch.zeros(T, nu, device=device, dtype=dtype)
+
+        Vx = self.lf_x(xs[-1])
+        Vxx = self.lf_xx(xs[-1])
+
+        for i in reversed(range(T)):
+            x = xs[i]
+            u = us[i]
+            
+            lx = self.l_x(x, u)
+            lu = self.l_u(x, u)
+            lxx = self.l_xx(x, u) 
+            luu = self.l_uu(x, u)
+            lux = self.l_ux(x, u)
+
+            fx = self.f_x(x, u)
+            fu = self.f_u(x, u)
+
+            Qx = lx + fx.T @ Vx
+            Qu = lu + fu.T @ Vx
+            Qxx = lxx + fx.T @ Vxx @ fx
+            Quu = luu + fu.T @ Vxx @ fu + I_nu * reg
+            Qux = lux + fu.T @ Vxx @ fx 
+
+            k = -torch.linalg.solve(Quu, Qu)
+            K = -torch.linalg.solve(Quu, Qux)
+
+            Vx = Qx + Qux.T @ k
+            Vxx = Qxx + Qux.T @ K 
+
+            ks[i] = k
+            Ks[i] = K
+
+        return ks, Ks
+
+    def forward(
+        self,
+        xs,
+        us,
+        ks,
+        Ks,
+        alpha
+    ):
+        T, nu = us.shape
+        nx = self.nx
+        device = xs.device
+        dtype = xs.dtype
+
+        x = xs[0].clone()
+        
+        new_xs = torch.zeros(T+1, nx, device=device, dtype=dtype)
+        new_us = torch.zeros(T, nu, device=device, dtype=dtype)
+        new_xs[0] = x
+
+        for i in range(T):
+            delta_x = x - xs[i]
+            u = us[i] + alpha * ks[i] + Ks[i] @ delta_x
+            x = self.f(x,u)
+            new_xs[i+1] = x
+            new_us[i] = u
+
+        return new_xs, new_us
+
+    def rollout(
+            self,
+            x0, 
+            us
+    ):
+        T, _ = us.shape
+        nx = self.nx
+        device = us.device
+        dtype = us.dtype
+
+        xs = torch.zeros(T+1, nx, device=device, dtype=dtype)
+        x = x0.clone()
+        xs[0] = x
+
+        for i in range(T):
+            u = us[i]
+            x = self.f(x,u)
+            xs[i+1] = x
+
+        return xs
+    
+    def total_cost(
+        self,
+        xs,
+        us
+    ):
+        T, _ = us.shape
+        cost = 0.
+        
+        for i in range(T):
+            x = xs[i]
+            u = us[i]
+
+            cost += self.l(x,u)
+
+        x = xs[-1]
+        cost += self.lf(x)
+
+        return cost

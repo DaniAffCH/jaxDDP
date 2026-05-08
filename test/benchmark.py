@@ -34,26 +34,30 @@ def terminal_cost(x):
 
 N_ITER = 50
 REG    = 0.01
-BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
+
+LARGE_BATCH_MODE = True
+
+BATCH_SIZES = (
+    [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+    if LARGE_BATCH_MODE else
+    [1, 2, 4, 8, 16, 32, 64]
+)
 
 def make_problem(B, device):
-    thetas  = torch.linspace(-3.14, 3.14, B, dtype=dtype, device=device)
-    x0      = torch.zeros(B, nx, dtype=dtype, device=device)
+    thetas   = torch.linspace(-3.14, 3.14, B, dtype=dtype, device=device)
+    x0       = torch.zeros(B, nx, dtype=dtype, device=device)
     x0[:, 1] = thetas
-    us_init = torch.zeros(B, T, nu, dtype=dtype, device=device)
+    us_init  = torch.zeros(B, T, nu, dtype=dtype, device=device)
     return x0, us_init
 
-def time_sequential(solver_cpu, B, n_repeat=3):
+def time_sequential(solver, B, n_repeat=3):
     times = []
     for _ in range(n_repeat):
         x0, us_init = make_problem(B, "cpu")
         t0 = time.time()
         for b in range(B):
-            solver_cpu.solve(
-                x0[b].unsqueeze(0),
-                us_init[b].unsqueeze(0),
-                n_iter=N_ITER, reg=REG
-            )
+            solver.solve(x0[b].unsqueeze(0), us_init[b].unsqueeze(0),
+                         n_iter=N_ITER, reg=REG)
         times.append(time.time() - t0)
     return np.mean(times)
 
@@ -70,83 +74,93 @@ def time_batched(solver, B, device, n_repeat=3):
         times.append(time.time() - t0)
     return np.mean(times)
 
-devices = ["cpu"]
-if torch.cuda.is_available():
-    devices.append("cuda")
+has_gpu = torch.cuda.is_available()
+if has_gpu:
     print("GPU detected:", torch.cuda.get_device_name(0))
 else:
     print("No GPU detected, running CPU only.")
 
 solver_cpu = TorchDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu)
-solvers = {"cpu": solver_cpu}
-if "cuda" in devices:
-    solvers["cuda"] = TorchDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu)
+solver_gpu = TorchDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu) if has_gpu else None
 
-print("\nRunning benchmark...")
-print(f"{'B':>6}  {'sequential (s)':>16}  {'batched CPU (s)':>16}  {'speedup CPU':>12}", end="")
-if "cuda" in devices:
-    print(f"  {'batched GPU (s)':>16}  {'speedup GPU':>12}", end="")
-print()
-
-results = {
-    "B":              BATCH_SIZES,
-    "sequential":     [],
-    "batched_cpu":    [],
-    "speedup_cpu":    [],
-}
-if "cuda" in devices:
+results = {"B": BATCH_SIZES, "batched_cpu": [], "speedup_cpu": []}
+if not LARGE_BATCH_MODE:
+    results["sequential"] = []
+if has_gpu:
     results["batched_gpu"] = []
     results["speedup_gpu"] = []
 
+header = f"{'B':>6}  {'batched CPU (s)':>16}"
+if not LARGE_BATCH_MODE:
+    header = f"{'B':>6}  {'sequential (s)':>16}  {'batched CPU (s)':>16}  {'speedup CPU':>12}"
+if has_gpu:
+    header += f"  {'batched GPU (s)':>16}  {'speedup GPU':>12}"
+print("\n" + header)
+
 for B in BATCH_SIZES:
-    t_seq        = time_sequential(solver_cpu, B)
-    t_batch_cpu  = time_batched(solvers["cpu"], B, "cpu")
-    speedup_cpu  = t_seq / t_batch_cpu
-
-    results["sequential"].append(t_seq)
+    t_batch_cpu = time_batched(solver_cpu, B, "cpu")
     results["batched_cpu"].append(t_batch_cpu)
-    results["speedup_cpu"].append(speedup_cpu)
 
-    row = f"{B:>6}  {t_seq:>16.3f}  {t_batch_cpu:>16.3f}  {speedup_cpu:>12.2f}x"
+    if LARGE_BATCH_MODE:
+        row = f"{B:>6}  {t_batch_cpu:>16.3f}"
+    else:
+        t_seq = time_sequential(solver_cpu, B)
+        speedup_cpu = t_seq / t_batch_cpu
+        results["sequential"].append(t_seq)
+        results["speedup_cpu"].append(speedup_cpu)
+        row = f"{B:>6}  {t_seq:>16.3f}  {t_batch_cpu:>16.3f}  {speedup_cpu:>12.2f}x"
 
-    if "cuda" in devices:
-        t_batch_gpu = time_batched(solvers["cuda"], B, "cuda")
-        speedup_gpu = t_seq / t_batch_gpu
+    if has_gpu:
+        t_batch_gpu = time_batched(solver_gpu, B, "cuda")
         results["batched_gpu"].append(t_batch_gpu)
-        results["speedup_gpu"].append(speedup_gpu)
-        row += f"  {t_batch_gpu:>16.3f}  {speedup_gpu:>12.2f}x"
+        if not LARGE_BATCH_MODE:
+            speedup_gpu = t_seq / t_batch_gpu
+            results["speedup_gpu"].append(speedup_gpu)
+            row += f"  {t_batch_gpu:>16.3f}  {speedup_gpu:>12.2f}x"
+        else:
+            row += f"  {t_batch_gpu:>16.3f}"
 
     print(row)
-
-fig = plt.figure(figsize=(14, 5))
-gs  = gridspec.GridSpec(1, 2, figure=fig)
 
 B_arr  = np.array(BATCH_SIZES)
 colors = {"sequential": "#e07b54", "batched_cpu": "#4c8eda", "batched_gpu": "#4cbe7a"}
 
-ax1 = fig.add_subplot(gs[0])
-ax1.plot(B_arr, results["sequential"],  "o-", color=colors["sequential"],  label="Sequential (CPU)", lw=2)
-ax1.plot(B_arr, results["batched_cpu"], "s-", color=colors["batched_cpu"], label="Batched (CPU)",     lw=2)
-if "cuda" in devices:
-    ax1.plot(B_arr, results["batched_gpu"], "^-", color=colors["batched_gpu"], label="Batched (GPU)", lw=2)
-ax1.set_xlabel("Batch size B")
-ax1.set_ylabel("Wall-clock time (s)")
-ax1.set_title("Wall-clock time vs batch size")
-ax1.legend()
-ax1.set_xticks(B_arr)
-ax1.grid(True, alpha=0.3)
+if LARGE_BATCH_MODE:
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(B_arr, results["batched_cpu"], "s-", color=colors["batched_cpu"], label="Batched CPU", lw=2)
+    if has_gpu:
+        ax.plot(B_arr, results["batched_gpu"], "^-", color=colors["batched_gpu"], label="Batched GPU", lw=2)
+    ax.set_xlabel("Batch size B")
+    ax.set_ylabel("Wall-clock time (s)")
+    ax.set_title("Batched DDP — wall-clock time vs batch size")
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(B_arr)
+    ax.get_xaxis().set_major_formatter(plt.ScalarFormatter())
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+else:
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    ax1.plot(B_arr, results["sequential"],  "o-", color=colors["sequential"],  label="Sequential (CPU)", lw=2)
+    ax1.plot(B_arr, results["batched_cpu"], "s-", color=colors["batched_cpu"], label="Batched (CPU)",     lw=2)
+    if has_gpu:
+        ax1.plot(B_arr, results["batched_gpu"], "^-", color=colors["batched_gpu"], label="Batched (GPU)", lw=2)
+    ax1.set_xlabel("Batch size B")
+    ax1.set_ylabel("Wall-clock time (s)")
+    ax1.set_title("Wall-clock time vs batch size")
+    ax1.legend()
+    ax1.set_xticks(B_arr)
+    ax1.grid(True, alpha=0.3)
 
-ax2 = fig.add_subplot(gs[1])
-ax2.plot(B_arr, results["speedup_cpu"], "s-", color=colors["batched_cpu"], label="Batched CPU / Sequential", lw=2)
-if "cuda" in devices:
-    ax2.plot(B_arr, results["speedup_gpu"], "^-", color=colors["batched_gpu"], label="Batched GPU / Sequential", lw=2)
-ax2.axhline(1.0, color="gray", ls="--", lw=1)
-ax2.set_xlabel("Batch size B")
-ax2.set_ylabel("Speedup (×)")
-ax2.set_title("Speedup over sequential")
-ax2.legend()
-ax2.set_xticks(B_arr)
-ax2.grid(True, alpha=0.3)
+    ax2.plot(B_arr, results["speedup_cpu"], "s-", color=colors["batched_cpu"], label="Batched CPU / Sequential", lw=2)
+    if has_gpu:
+        ax2.plot(B_arr, results["speedup_gpu"], "^-", color=colors["batched_gpu"], label="Batched GPU / Sequential", lw=2)
+    ax2.axhline(1.0, color="gray", ls="--", lw=1)
+    ax2.set_xlabel("Batch size B")
+    ax2.set_ylabel("Speedup (×)")
+    ax2.set_title("Speedup over sequential")
+    ax2.legend()
+    ax2.set_xticks(B_arr)
+    ax2.grid(True, alpha=0.3)
 
 plt.tight_layout()
 plt.savefig("benchmark.png", dpi=150)

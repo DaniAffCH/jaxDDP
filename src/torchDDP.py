@@ -27,6 +27,8 @@ class TorchDDP:
         x0: torch.Tensor,  
         us_guess: torch.Tensor,
         n_iter: int,
+        # Backward parameters:
+        reg: float = 1e-4,
         # Line search parameters:
         ls_rho: float = 0.5,
         ls_beta: float = 1e-4,
@@ -36,7 +38,7 @@ class TorchDDP:
         xs = self.rollout(x0, us)
 
         for _ in range(n_iter):
-            ks, Ks, dV1, dV2 = self.backward(xs, us)
+            ks, Ks, dV1, dV2 = self.backward(xs, us, reg)
             xs, us = self.forward_ls(xs, us, ks, Ks, dV1, dV2, ls_rho, ls_beta, ls_max_iter)
 
 
@@ -46,7 +48,7 @@ class TorchDDP:
         self,
         xs,
         us,
-        reg = 1e-6
+        reg
     ):
         T, nu = us.shape
         nx = self.nx

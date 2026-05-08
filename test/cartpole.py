@@ -9,7 +9,7 @@ device = "cpu"
 
 nx, nu = 4, 1
 dt     = 0.05
-T      = 100
+T      = 50
 
 mc = 1.0
 mp = 0.1
@@ -33,19 +33,19 @@ def dynamics(x, u):
     return x + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
 
 def running_cost(x, u):
-    return 0.5 * (x[0]**2 + 10.0 * x[1]**2 + 0.1 * (u @ u))
+    return 0.5 * (x[0]**2 + 10.0 * x[1]**2 + 1 * (u @ u))
 
 def terminal_cost(x):
     return 50.0 * (x[0]**2 + 10.0 * x[1]**2 + 3 * x[2]**2 + 3 * x[3]**2)
 
-x0      = torch.tensor([0.0, -1.5, 0.0, 0.0], dtype=dtype)
+x0      = torch.tensor([0.0, -3.14, 0.0, 0.0], dtype=dtype)
 us_init = torch.zeros(T, nu, dtype=dtype)
 
 t0 = time.time()
 solver = TorchDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu)
 print(f"Solver setup time: {time.time() - t0}")
 t0 = time.time()
-xs, us = solver.solve(x0, us_init, n_iter=200, reg=0.01)
+xs, us = solver.solve(x0, us_init, n_iter=100, reg=0.01)
 print(f"Solver solve time: {time.time() - t0}")
 
 print("Final state:", xs[-1])

@@ -1,11 +1,12 @@
-import torch
+import jax
+import jax.numpy as jnp
+import numpy as np
 import time
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-import numpy as np
-from ..src import TorchDDP
+from ...src import JaxDDP
 
-dtype = torch.float64
+jax.config.update("jax_enable_x64", True)
+
 nx, nu = 4, 1
 dt     = 0.05
 T      = 50
@@ -14,12 +15,12 @@ mc, mp, l, g = 1.0, 0.1, 0.5, 9.81
 def dynamics(x, u):
     def f(x):
         p, theta, pdot, thetadot = x[0], x[1], x[2], x[3]
-        sin_t = torch.sin(theta)
-        cos_t = torch.cos(theta)
+        sin_t = jnp.sin(theta)
+        cos_t = jnp.cos(theta)
         denom = mc + mp * sin_t**2
         p_ddot     = (u[0] + mp * sin_t * (l * thetadot**2 - g * cos_t)) / denom
         theta_ddot = (g * sin_t * (mc + mp) - cos_t * (u[0] + mp * l * thetadot**2 * sin_t)) / (l * denom)
-        return torch.stack([pdot, thetadot, p_ddot, theta_ddot])
+        return jnp.stack([pdot, thetadot, p_ddot, theta_ddot])
     k1 = f(x)
     k2 = f(x + dt/2 * k1)
     k3 = f(x + dt/2 * k2)
@@ -43,45 +44,59 @@ BATCH_SIZES = (
     [1, 2, 4, 8, 16, 32, 64]
 )
 
-def make_problem(B, device):
-    thetas   = torch.linspace(-3.14, 3.14, B, dtype=dtype, device=device)
-    x0       = torch.zeros(B, nx, dtype=dtype, device=device)
-    x0[:, 1] = thetas
-    us_init  = torch.zeros(B, T, nu, dtype=dtype, device=device)
-    return x0, us_init
+try:
+    gpu_device = jax.devices('gpu')[0]
+    has_gpu = True
+except RuntimeError:
+    has_gpu = False
 
-def time_sequential(solver, B, n_repeat=3):
-    times = []
-    for _ in range(n_repeat):
-        x0, us_init = make_problem(B, "cpu")
-        t0 = time.time()
-        for b in range(B):
-            solver.solve(x0[b].unsqueeze(0), us_init[b].unsqueeze(0),
-                         n_iter=N_ITER, reg=REG)
-        times.append(time.time() - t0)
-    return np.mean(times)
+cpu_device = jax.devices('cpu')[0]
 
-def time_batched(solver, B, device, n_repeat=3):
-    times = []
-    for _ in range(n_repeat):
-        x0, us_init = make_problem(B, device)
-        if device == "cuda":
-            torch.cuda.synchronize()
-        t0 = time.time()
-        solver.solve(x0, us_init, n_iter=N_ITER, reg=REG)
-        if device == "cuda":
-            torch.cuda.synchronize()
-        times.append(time.time() - t0)
-    return np.mean(times)
-
-has_gpu = torch.cuda.is_available()
 if has_gpu:
-    print("GPU detected:", torch.cuda.get_device_name(0))
+    print("GPU detected:", gpu_device)
 else:
     print("No GPU detected, running CPU only.")
 
-solver_cpu = TorchDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu)
-solver_gpu = TorchDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu) if has_gpu else None
+def make_problem(B, device=None):
+    thetas  = jnp.linspace(-3.14, 3.14, B)
+    x0      = jnp.zeros((B, nx))
+    x0      = x0.at[:, 1].set(thetas)
+    us_init = jnp.zeros((B, T, nu))
+    if device is not None:
+        x0      = jax.device_put(x0, device)
+        us_init = jax.device_put(us_init, device)
+    return x0, us_init
+
+def time_sequential(solver, B, device=None, n_repeat=3):
+    # Warmup: compile for batch size 1
+    x0_w, us_w = make_problem(1, device)
+    jax.block_until_ready(solver.solve(x0_w, us_w, N_ITER, REG))
+
+    times = []
+    for _ in range(n_repeat):
+        x0, us_init = make_problem(B, device)
+        t0 = time.time()
+        for b in range(B):
+            result = solver.solve(x0[b:b+1], us_init[b:b+1], N_ITER, REG)
+            jax.block_until_ready(result)
+        times.append(time.time() - t0)
+    return np.mean(times)
+
+def time_batched(solver, B, device=None, n_repeat=3):
+    # Warmup: compile for this batch size
+    x0_w, us_w = make_problem(B, device)
+    jax.block_until_ready(solver.solve(x0_w, us_w, N_ITER, REG))
+
+    times = []
+    for _ in range(n_repeat):
+        x0, us_init = make_problem(B, device)
+        t0 = time.time()
+        result = solver.solve(x0, us_init, N_ITER, REG)
+        jax.block_until_ready(result)
+        times.append(time.time() - t0)
+    return np.mean(times)
+
+solver = JaxDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu)
 
 results = {"B": BATCH_SIZES, "batched_cpu": [], "speedup_cpu": []}
 if not LARGE_BATCH_MODE:
@@ -98,20 +113,20 @@ if has_gpu:
 print("\n" + header)
 
 for B in BATCH_SIZES:
-    t_batch_cpu = time_batched(solver_cpu, B, "cpu")
+    t_batch_cpu = time_batched(solver, B, cpu_device)
     results["batched_cpu"].append(t_batch_cpu)
 
     if LARGE_BATCH_MODE:
         row = f"{B:>6}  {t_batch_cpu:>16.3f}"
     else:
-        t_seq = time_sequential(solver_cpu, B)
+        t_seq = time_sequential(solver, B, cpu_device)
         speedup_cpu = t_seq / t_batch_cpu
         results["sequential"].append(t_seq)
         results["speedup_cpu"].append(speedup_cpu)
         row = f"{B:>6}  {t_seq:>16.3f}  {t_batch_cpu:>16.3f}  {speedup_cpu:>12.2f}x"
 
     if has_gpu:
-        t_batch_gpu = time_batched(solver_gpu, B, "cuda")
+        t_batch_gpu = time_batched(solver, B, gpu_device)
         results["batched_gpu"].append(t_batch_gpu)
         if not LARGE_BATCH_MODE:
             speedup_gpu = t_seq / t_batch_gpu
@@ -132,7 +147,7 @@ if LARGE_BATCH_MODE:
         ax.plot(B_arr, results["batched_gpu"], "^-", color=colors["batched_gpu"], label="Batched GPU", lw=2)
     ax.set_xlabel("Batch size B")
     ax.set_ylabel("Wall-clock time (s)")
-    ax.set_title("Batched DDP — wall-clock time vs batch size")
+    ax.set_title("Batched JAX DDP — wall-clock time vs batch size")
     ax.set_xscale("log", base=2)
     ax.set_xticks(B_arr)
     ax.get_xaxis().set_major_formatter(plt.ScalarFormatter())
@@ -163,6 +178,6 @@ else:
     ax2.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig("benchmark.png", dpi=150)
+plt.savefig("benchmark_jax.png", dpi=150)
 plt.show()
-print("\nSaved benchmark.png")
+print("\nSaved benchmark_jax.png")

@@ -1,11 +1,11 @@
-import torch
+import jax
+import jax.numpy as jnp
 import numpy as np
-from ..src import TorchDDP
-from .utils import gif_cartpole
+from ...src import JaxDDP
+from ..utils import gif_cartpole
 import time
 
-dtype  = torch.float64
-device = "cpu"
+jax.config.update("jax_enable_x64", True)
 
 nx, nu = 4, 1
 dt     = 0.05
@@ -19,12 +19,12 @@ g  = 9.81
 def dynamics(x, u):
     def f(x):
         p, theta, pdot, thetadot = x[0], x[1], x[2], x[3]
-        sin_t = torch.sin(theta)
-        cos_t = torch.cos(theta)
+        sin_t = jnp.sin(theta)
+        cos_t = jnp.cos(theta)
         denom = mc + mp * sin_t**2
         p_ddot     = (u[0] + mp * sin_t * (l * thetadot**2 - g * cos_t)) / denom
         theta_ddot = (g * sin_t * (mc + mp) - cos_t * (u[0] + mp * l * thetadot**2 * sin_t)) / (l * denom)
-        return torch.stack([pdot, thetadot, p_ddot, theta_ddot])
+        return jnp.stack([pdot, thetadot, p_ddot, theta_ddot])
 
     k1 = f(x)
     k2 = f(x + dt/2 * k1)
@@ -38,17 +38,24 @@ def running_cost(x, u):
 def terminal_cost(x):
     return 50.0 * (x[0]**2 + 10.0 * x[1]**2 + 3 * x[2]**2 + 3 * x[3]**2)
 
-x0      = torch.tensor([0.0, -3.14, 0.0, 0.0], dtype=dtype).unsqueeze(0)
-us_init = torch.zeros(1, T, nu, dtype=dtype)        
+x0      = jnp.array([[0.0, -3.14, 0.0, 0.0]])
+us_init = jnp.zeros((1, T, nu))
 
 t0 = time.time()
-solver = TorchDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu)
+solver = JaxDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu)
 print(f"Solver setup time: {time.time() - t0}")
+
 t0 = time.time()
-xs, us = solver.solve(x0, us_init, n_iter=100, reg=0.01)
-print(f"Solver solve time: {time.time() - t0}")
+xs, us = solver.solve(x0, us_init, 100, 0.01)
+jax.block_until_ready((xs, us))
+print(f"Solver solve time (includes JIT compilation): {time.time() - t0}")
+
+t0 = time.time()
+xs, us = solver.solve(x0, us_init, 100, 0.01)
+jax.block_until_ready((xs, us))
+print(f"Solver solve time (compiled): {time.time() - t0}")
 
 print("Final state:", xs[0, -1])
-print("Final cost: ", solver.total_cost(xs, us)[0].item())
+print("Final cost: ", float(solver.total_cost(xs, us)[0]))
 
-gif_cartpole(xs[0], dt=dt, l=l, path="cartpole.gif", fps=15)
+gif_cartpole(np.array(xs[0]), dt=dt, l=l, path="cartpole.gif", fps=15)

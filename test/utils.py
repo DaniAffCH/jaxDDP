@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.animation import FuncAnimation, PillowWriter
 
-def gif_cartpole(xs: torch.Tensor, dt: float, l: float, path: str = "cartpole.gif", fps: int = 30):
-    xs_np = xs.detach().cpu().numpy() 
+def gif_cartpole(xs, dt: float, l: float, path: str = "cartpole.gif", fps: int = 30):
+    xs_np = xs.detach().cpu().numpy() if hasattr(xs, 'detach') else np.asarray(xs)
     T     = len(xs_np) - 1
  
     cart_w, cart_h = 0.4, 0.2

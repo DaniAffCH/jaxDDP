@@ -27,11 +27,11 @@ class JaxDDP:
         self.dyn_derivs = lambda x, u: (self.f_x(x,u), self.f_u(x,u))
 
         self.rollout  = jit(self._rollout)
-        self.backward = jax.jit(self._backward, static_argnums=(2,)) # reg
+        self.backward = jax.jit(self._backward, static_argnames=('reg')) 
         self.forward = jit(self._forward)
         self.armijo_condition = jit(self._armijo_condition)
         self.total_cost = jit(self._total_cost)
-        self.solve = jax.jit(self._solve, static_argnums=(2, 3, 4, 5, 6))  # n_iter, reg, rho, beta, max_iter
+        self.solve = jax.jit(self._solve, static_argnames=('n_iter', 'termination_tol', 'reg', 'ls_rho', 'ls_beta', 'ls_max_iter'))
         
     def _backward(
         self,
@@ -111,6 +111,7 @@ class JaxDDP:
         x0,  
         us_guess,
         n_iter: int,
+        termination_tol = 1e-4,
         # Backward parameters:
         reg: float = 1e-4,
         # Line search parameters:
@@ -118,18 +119,24 @@ class JaxDDP:
         ls_beta: float = 1e-4,
         ls_max_iter: int = 10,
     ):        
-        def solve_scan(traj, _):
-            xs,us = traj
+        B = us_guess.shape[0]
+        
+        def solve_scan(traj):
+            xs,us, _, it = traj
             ks, Ks, dV1, dV2 = self._backward(xs, us, reg)
             new_xs, new_us = self._forward_ls(xs, us, ks, Ks, dV1, dV2, ls_rho, ls_beta, ls_max_iter)
-            return (new_xs, new_us), None
+            return new_xs, new_us, dV1, it+1
 
         carry = (
             self._rollout(x0, us_guess),
-            us_guess
+            us_guess,
+            jnp.inf * jnp.ones(B), # dV1
+            0 # iter count 
         )   
         
-        (xs,us), _ = jax.lax.scan(solve_scan, carry, None, length=n_iter)
+        cond_fn = lambda carry: (jnp.abs(carry[2]).max() > termination_tol) & (carry[3] < n_iter)
+        
+        xs,us,_,_ = jax.lax.while_loop(cond_fn, solve_scan, carry)
         
         return xs,us
     
@@ -180,9 +187,8 @@ class JaxDDP:
         B, _, _ = xs.shape
         J_nom = self._total_cost(xs, us)
         
-        # TODO: no early exit for now, I might want to rewrite it with lax.while_loop
-        def forward_ls_scan(carry, _):
-            new_xs, new_us, alpha, accepted = carry
+        def forward_ls_scan(carry):
+            new_xs, new_us, alpha, accepted, it = carry
             try_xs, try_us = self._forward(xs, us, ks, Ks, alpha)
             armijo_ok = self._armijo_condition(try_xs, try_us, J_nom, alpha, dV1, dV2, beta)
             newly_accepted = armijo_ok & ~accepted
@@ -190,16 +196,19 @@ class JaxDDP:
             new_us = jnp.where(newly_accepted[:, None, None], try_us, new_us)
             accepted = accepted | newly_accepted
             alpha = jnp.where(accepted, alpha, alpha * rho)
-            return (new_xs, new_us, alpha, accepted), None
+            return new_xs, new_us, alpha, accepted, it+1
             
         carry = (
             xs, 
             us, 
             jnp.ones(B), # alphas
-            jnp.zeros(B, dtype=bool) # accepted
+            jnp.zeros(B, dtype=bool), # accepted
+            0 # iter count
         )
         
-        (new_xs, new_us, _, _), _ = jax.lax.scan(forward_ls_scan, carry, None, length=max_iter)
+        cond_fn = lambda carry: ~carry[3].all() & (carry[4] < max_iter)
+        
+        new_xs, new_us, _, _, _ = jax.lax.while_loop(cond_fn, forward_ls_scan, carry)
         
         return new_xs, new_us
             

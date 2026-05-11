@@ -1,5 +1,5 @@
 import torch
-from ...src import TorchDDP
+from jaxddp import TorchDDP
 from ..utils import gif_cartpole
 import time
 

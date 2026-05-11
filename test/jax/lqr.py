@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from scipy.linalg import solve_discrete_are
-from ...src import JaxDDP
+from jaxddp import JaxDDP
 
 jax.config.update("jax_enable_x64", True)
 

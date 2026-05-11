@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from scipy.linalg import solve_discrete_are
-from ...src import TorchDDP
+from jaxddp import TorchDDP
 
 torch.manual_seed(0)
 dtype  = torch.float64

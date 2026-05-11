@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import time
 import matplotlib.pyplot as plt
-from ...src import JaxDDP
+from jaxddp import JaxDDP
 
 jax.config.update("jax_enable_x64", True)
 

@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from ...src import JaxDDP
+from jaxddp import JaxDDP
 from ..utils import gif_cartpole
 import time
 

@@ -2,7 +2,7 @@ import torch
 import time
 import matplotlib.pyplot as plt
 import numpy as np
-from ...src import TorchDDP
+from jaxddp import TorchDDP
 
 dtype = torch.float64
 nx, nu = 4, 1

@@ -42,7 +42,11 @@ solver = JaxDDP(dynamics, running_cost, terminal_cost, nx=2, nu=1)
 x0      = jnp.array([[1.0, 0.0]])
 us_init = jnp.zeros((1, 50, 1))
 
-xs, us = solver.solve(x0, us_init, n_iter=100)
+result = solver.solve(x0, us_init, n_iter=100)
+xs   = result["xs"]     # (B, T+1, nx) state trajectory
+us   = result["us"]     # (B, T, nu)   optimised actions
+cost = result["cost"]   # (B,)         total cost per problem
+it   = result["n_iter"] # scalar       iterations until convergence
 ```
 
 See `test/` for cartpole and LQR examples.

@@ -16,6 +16,37 @@ Then install jaxddp:
 pip install -e .
 ```
 
+## Usage
+
+Define your dynamics and cost functions, then solve:
+
+```python
+import jax.numpy as jnp
+from jaxddp import JaxDDP
+
+# scalar-in, scalar-out functions operating on a single (x, u) pair
+def dynamics(x, u):
+    A = jnp.array([[1.0, 0.05], [0.0, 1.0]])
+    B = jnp.array([[0.0], [0.05]])
+    return A @ x + B @ u
+
+def running_cost(x, u):
+    return 0.5 * (x @ x + 0.1 * (u @ u))
+
+def terminal_cost(x):
+    return 5.0 * (x @ x)
+
+solver = JaxDDP(dynamics, running_cost, terminal_cost, nx=2, nu=1)
+
+# x0: (B, nx)  us_init: (B, T, nu)  — batched over B independent problems
+x0      = jnp.array([[1.0, 0.0]])
+us_init = jnp.zeros((1, 50, 1))
+
+xs, us = solver.solve(x0, us_init, n_iter=100)
+```
+
+See `test/` for cartpole and LQR examples.
+
 ## Benchmark
 
 Results on NVIDIA GeForce RTX 5090 / AMD Ryzen 9-9950X.

@@ -2,6 +2,22 @@
 
 A JAX-based differentiable dynamic programming implementation. It solves batched problems on GPUs.
 
+## Installation
+
+Install the CUDA-enabled JAX for your system first:
+```bash
+pip install "jax[cuda12]"   # CUDA 12
+pip install "jax[cuda11]"   # CUDA 11
+pip install jax             # CPU only
+```
+Then install jaxddp:
+
+```bash
+pip install -e .
+```
+
+## Benchmark
+
 Benchmark on NVIDIA GeForce RTX 4060 and Intel Core i9-14900HX batched CPU vs batched GPU:
 
 ![benchmark_jax_gpu](imgs/benchmark_jax_gpu.png)

@@ -32,6 +32,7 @@ class JaxDDP:
         self.armijo_condition = jit(self._armijo_condition)
         self.total_cost = jit(self._total_cost)
         self.solve = jax.jit(self._solve, static_argnames=('n_iter', 'termination_tol', 'reg', 'ls_rho', 'ls_beta', 'ls_max_iter'))
+        self.fast_solve = jax.jit(self._fast_solve, static_argnames=('n_iter',))
         
     def _backward(
         self,
@@ -252,5 +253,27 @@ class JaxDDP:
         
         running = vmap(self.l)(xs_flat, us_flat).reshape(B, T).sum(axis=1)
         final = vmap(self.lf)(xs[:,-1])
-        
+
         return running + final
+
+    # No line search, no termination condition
+    def _fast_solve(
+        self,
+        x0,
+        us_guess,
+        n_iter: int,
+        alpha: float = 0.1,
+        reg: float = 1e-4,
+    ):
+        
+        B = us_guess.shape[0]
+
+        def scan_body(carry, _):
+            xs, us = carry
+            ks, Ks, _, _ = self._backward(xs, us, reg)
+            new_xs, new_us = self._forward(xs, us, ks, Ks, alpha * jnp.ones(B))
+            return (new_xs, new_us), None
+
+        xs_init = self._rollout(x0, us_guess)
+        (xs, us), _ = jax.lax.scan(scan_body, (xs_init, us_guess), None, length=n_iter)
+        return {"xs": xs, "us": us, "cost": self._total_cost(xs, us)}

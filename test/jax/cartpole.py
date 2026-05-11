@@ -46,16 +46,17 @@ solver = JaxDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu)
 print(f"Solver setup time: {time.time() - t0}")
 
 t0 = time.time()
-xs, us = solver.solve(x0, us_init, 100, 0.01)
-jax.block_until_ready((xs, us))
+result = solver.solve(x0, us_init, 100, 0.01)
+jax.block_until_ready(result)
 print(f"Solver solve time (includes JIT compilation): {time.time() - t0}")
 
 t0 = time.time()
-xs, us = solver.solve(x0, us_init, 100, 0.01)
-jax.block_until_ready((xs, us))
+result = solver.solve(x0, us_init, 100, 0.01)
+jax.block_until_ready(result)
 print(f"Solver solve time (compiled): {time.time() - t0}")
 
+xs, us = result["xs"], result["us"]
 print("Final state:", xs[0, -1])
-print("Final cost: ", float(solver.total_cost(xs, us)[0]))
+print(f"Final cost:  {float(result['cost'][0]):.4f}  (iters: {int(result['n_iter'])})")
 
 gif_cartpole(np.array(xs[0]), dt=dt, l=l, path="cartpole.gif", fps=15)

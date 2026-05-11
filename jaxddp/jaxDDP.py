@@ -136,9 +136,9 @@ class JaxDDP:
         
         cond_fn = lambda carry: (jnp.abs(carry[2]).max() > termination_tol) & (carry[3] < n_iter)
         
-        xs,us,_,_ = jax.lax.while_loop(cond_fn, solve_scan, carry)
-        
-        return xs,us
+        xs, us, _, it = jax.lax.while_loop(cond_fn, solve_scan, carry)
+
+        return {"xs": xs, "us": us, "n_iter": it, "cost": self._total_cost(xs, us)}
     
     def _forward(
         self,

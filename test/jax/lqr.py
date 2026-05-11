@@ -25,10 +25,11 @@ x0      = jnp.array([[1.0, 0.0]])
 us_init = jnp.zeros((1, T, nu))
 
 solver = JaxDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu)
-xs, us = solver.solve(x0, us_init, 50)
+result = solver.solve(x0, us_init, 50)
+xs, us = result["xs"], result["us"]
 
 print("DDP final state:", xs[0, -1])
-print("DDP final cost: ", float(solver.total_cost(xs, us)[0]))
+print(f"DDP final cost:  {float(result['cost'][0]):.4f}  (iters: {int(result['n_iter'])})")
 
 A = np.array([[1.0, dt], [0.0, 1.0]])
 B = np.array([[0.0], [dt]])

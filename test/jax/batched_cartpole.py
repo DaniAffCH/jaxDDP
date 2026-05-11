@@ -48,19 +48,20 @@ solver = JaxDDP(dynamics, running_cost, terminal_cost, nx=nx, nu=nu)
 print(f"Solver setup time: {time.time() - t0}")
 
 t0 = time.time()
-xs, us = solver.solve(x0, us_init, 100, 0.01)
-jax.block_until_ready((xs, us))
+result = solver.solve(x0, us_init, 100, 0.01)
+jax.block_until_ready(result)
 print(f"Solver solve time (includes JIT compilation): {time.time() - t0}")
 
 t0 = time.time()
-xs, us = solver.solve(x0, us_init, 100, 0.01)
-jax.block_until_ready((xs, us))
+result = solver.solve(x0, us_init, 100, 0.01)
+jax.block_until_ready(result)
 print(f"Solver solve time (compiled): {time.time() - t0}")
 
-costs = solver.total_cost(xs, us)
+xs, us, costs = result["xs"], result["us"], result["cost"]
 print(f"Final costs — mean: {float(costs.mean()):.4f}  "
       f"min: {float(costs.min()):.4f}  "
-      f"max: {float(costs.max()):.4f}")
+      f"max: {float(costs.max()):.4f}  "
+      f"(iters: {int(result['n_iter'])})")
 
 best  = int(costs.argmin())
 worst = int(costs.argmax())

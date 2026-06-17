@@ -29,7 +29,6 @@ class JaxDDP:
         self.rollout  = jit(self._rollout)
         self.backward = jax.jit(self._backward, static_argnames=('reg')) 
         self.forward = jit(self._forward)
-        self.armijo_condition = jit(self._armijo_condition)
         self.total_cost = jit(self._total_cost)
         self.solve = jax.jit(self._solve, static_argnames=('n_iter', 'termination_tol', 'reg', 'ls_rho', 'ls_beta', 'ls_max_iter'))
         self.fast_solve = jax.jit(self._fast_solve, static_argnames=('n_iter',))
@@ -172,7 +171,7 @@ class JaxDDP:
         
         return new_xs, new_us
     
-    # Forward with Armijo line search
+    # Forward with parallel Armijo line search
     def _forward_ls(
         self,
         xs,
@@ -187,45 +186,27 @@ class JaxDDP:
     ):
         B, _, _ = xs.shape
         J_nom = self._total_cost(xs, us)
-        
-        def forward_ls_scan(carry):
-            new_xs, new_us, alpha, accepted, it = carry
-            try_xs, try_us = self._forward(xs, us, ks, Ks, alpha)
-            armijo_ok = self._armijo_condition(try_xs, try_us, J_nom, alpha, dV1, dV2, beta)
-            newly_accepted = armijo_ok & ~accepted
-            new_xs = jnp.where(newly_accepted[:, None, None], try_xs, new_xs)
-            new_us = jnp.where(newly_accepted[:, None, None], try_us, new_us)
-            accepted = accepted | newly_accepted
-            alpha = jnp.where(accepted, alpha, alpha * rho)
-            return new_xs, new_us, alpha, accepted, it+1
-            
-        carry = (
-            xs, 
-            us, 
-            jnp.ones(B), # alphas
-            jnp.zeros(B, dtype=bool), # accepted
-            0 # iter count
-        )
-        
-        cond_fn = lambda carry: ~carry[3].all() & (carry[4] < max_iter)
-        
-        new_xs, new_us, _, _, _ = jax.lax.while_loop(cond_fn, forward_ls_scan, carry)
-        
-        return new_xs, new_us
-            
-    def _armijo_condition(
-        self,
-        xs,
-        us,
-        J_nom,
-        alpha,
-        dV1,
-        dV2,
-        beta
-    ):
-        J_try = self._total_cost(xs,us)
+        alphas = rho ** jnp.arange(max_iter) 
 
-        return J_try < J_nom + beta * (alpha * dV1 + 0.5 * alpha**2 * dV2)
+        def try_alpha(alpha):
+            new_xs, new_us = self._forward(xs, us, ks, Ks, alpha * jnp.ones(B))
+            J_try = self._total_cost(new_xs, new_us) 
+            ok = J_try < J_nom + beta * (alpha * dV1 + 0.5 * alpha**2 * dV2)  # Armijo condition
+            return new_xs, new_us, ok
+
+        all_xs, all_us, all_ok = jax.vmap(try_alpha)(alphas)
+
+        # take the largest alpha that satisfies armijo
+        first_valid = jnp.argmax(all_ok, axis=0)
+        any_valid = all_ok.any(axis=0)
+
+        sel_xs = all_xs.transpose(1, 0, 2, 3)[jnp.arange(B), first_valid]
+        sel_us = all_us.transpose(1, 0, 2, 3)[jnp.arange(B), first_valid]
+
+        # no alpha found, fallback
+        new_xs = jnp.where(any_valid[:, None, None], sel_xs, xs)
+        new_us = jnp.where(any_valid[:, None, None], sel_us, us)
+        return new_xs, new_us
     
     def _rollout(
         self,

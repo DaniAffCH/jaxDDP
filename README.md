@@ -78,3 +78,8 @@ Batched CPU vs batched GPU:
 | 1024 | 2.929 | 0.310 | 9.45× |
 | 2048 | 5.758 | 0.452 | 12.74× |
 | 4096 | 12.124 | 0.741 | 16.36× |
+
+## Contributing
+
+While the core algorithm is already implemented I'm looking forward to contributions to support equality and inequality constraints as described in: [Primal-Dual iLQR for GPU-Accelerated Learning and Control in Legged Robots](https://arxiv.org/pdf/2506.07823)
+
